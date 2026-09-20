@@ -1,0 +1,308 @@
+"""命令行入口逻辑。"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Any
+
+from .client import LoginRequired, SiteClient
+from .config import PROJECT_ROOT, load_config, resolve_path
+from .downloader import build_rpc, download_chapter, _sanitize
+from .library import Library
+from .login import run_login
+from .parser import ChapterRef, MangaInfo, parse_bookmarks, parse_manga_page
+
+BOOKMARK_URL_PATH = "/bookmark/"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="main.py",
+        description="Rawkuma 漫画下载器（命令行；登录使用浏览器）",
+    )
+    p.add_argument(
+        "-url", "--url",
+        metavar="MANGA_URL",
+        help="漫画详情页链接，下载该漫画（如 -url https://rawkuma.net/manga/<slug>/）",
+    )
+    p.add_argument(
+        "command",
+        nargs="?",
+        choices=["login", "bookmark", "update", "list"],
+        help="子命令: login=浏览器登录; bookmark=按收藏夹索引下载; "
+        "update=检查更新; list=查看本地库",
+    )
+    p.add_argument(
+        "--chapters",
+        help="只下载指定章节，如 1,3-5（与 -url / bookmark 配合）",
+    )
+    p.add_argument(
+        "--latest",
+        action="store_true",
+        help="只下载最新章节（与 -url / bookmark 配合）",
+    )
+    p.add_argument(
+        "--download",
+        action="store_true",
+        help="update 时自动下载新章节",
+    )
+    p.add_argument(
+        "--index",
+        type=int,
+        help="bookmark 时直接指定序号（跳过交互选择）",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        help="本次最多下载的章节数（按章节目录顺序），适合分批下载",
+    )
+    p.add_argument(
+        "--root",
+        help="覆盖下载根目录",
+    )
+    return p
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    config = load_config()
+    root = PROJECT_ROOT
+    if args.root:
+        config["download_root"] = args.root
+    cookies_path = resolve_path(root, config["cookies_file"])
+    lib_path = resolve_path(root, config["library_file"])
+    lib = Library(lib_path)
+
+    if args.command == "login":
+        ok = run_login(config, cookies_path)
+        sys.exit(0 if ok else 1)
+
+    if args.command == "list":
+        list_library(lib)
+        return
+
+    try:
+        with SiteClient(config, cookies_path) as site:
+            if args.url:
+                download_manga(
+                    site, lib, config,
+                    manga_url=args.url,
+                    chapters_spec=args.chapters,
+                    latest=args.latest,
+                    limit=args.limit,
+                )
+            elif args.command == "bookmark":
+                bookmark_flow(
+                    site, lib, config,
+                    index=args.index,
+                    chapters_spec=args.chapters,
+                    latest=args.latest,
+                    limit=args.limit,
+                )
+            elif args.command == "update":
+                update_flow(site, lib, config, auto_download=args.download)
+            else:
+                build_parser().print_help()
+    except LoginRequired as exc:
+        print(f"[错误] {exc}")
+        sys.exit(2)
+    except Exception as exc:  # noqa: BLE001 - 顶层兜底
+        print(f"[错误] {exc}")
+        sys.exit(1)
+
+
+# --------------------------------------------------------------------------- #
+# 下载流程
+# --------------------------------------------------------------------------- #
+def download_manga(
+    site: SiteClient,
+    lib: Library,
+    config: dict[str, Any],
+    manga_url: str,
+    *,
+    chapters_spec: str | None = None,
+    latest: bool = False,
+    targets: list[ChapterRef] | None = None,
+    limit: int | None = None,
+) -> None:
+    resp = site.get(manga_url)
+    manga = parse_manga_page(resp.text, str(resp.url))
+
+    root = resolve_path(PROJECT_ROOT, config["download_root"])
+    manga_dir = root / _sanitize(manga.title)
+    rec = lib.upsert_manga(manga, manga_dir)
+    lib.data["download_root"] = str(root)
+    lib.save()
+
+    if targets is None:
+        targets = _select_targets(manga, lib, chapters_spec=chapters_spec, latest=latest)
+    if limit and limit > 0:
+        targets = targets[:limit]
+
+    if not targets:
+        print(f"{manga.title}: 无需下载（已是最新）")
+        return
+
+    print(f"{manga.title}: 开始下载 {len(targets)} 个章节 -> {manga_dir}")
+    rpc = build_rpc(config)
+    try:
+        for i, chapter in enumerate(targets, 1):
+            print(f"  [{i}/{len(targets)}] {chapter.display} ...", end="", flush=True)
+            result = download_chapter(site, rpc, manga, rec, chapter, config)
+            if result.ok:
+                lib.record_chapter(
+                    rec,
+                    chapter_id=chapter.id,
+                    label=chapter.label,
+                    title=chapter.display,
+                    chapter_url=chapter.url,
+                    chapter_dir=_chapter_dir(manga_dir, chapter, config),
+                    pages=result.pages,
+                    files=result.files,
+                )
+                lib.save()
+                print(f" 完成（{result.pages} 页）")
+            else:
+                print(f"  失败: {result.message}")
+    finally:
+        rpc.close()
+
+
+def _chapter_dir(manga_dir: Path, chapter: ChapterRef, config: dict[str, Any]) -> Path:
+    from .downloader import chapter_dir_name
+
+    return manga_dir / _sanitize(chapter_dir_name(chapter.label, config["chapter_dir_style"]))
+
+
+def _select_targets(
+    manga: MangaInfo,
+    lib: Library,
+    *,
+    chapters_spec: str | None,
+    latest: bool,
+) -> list[ChapterRef]:
+    local = lib.chapter_ids(manga)
+    if latest:
+        latest_ch = sorted(manga.chapters, key=lambda c: c.order_key)[-1:]
+        return latest_ch
+    if chapters_spec:
+        keys = _parse_chapter_spec(chapters_spec)
+        return [c for c in manga.chapters if c.order_key[0] in keys]
+    return [c for c in manga.chapters if c.id not in local]
+
+
+def _parse_chapter_spec(spec: str) -> set[int]:
+    keys: set[int] = set()
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            a, b = token.split("-", 1)
+            keys.update(range(int(a), int(b) + 1))
+        else:
+            keys.add(int(token))
+    return keys
+
+
+# --------------------------------------------------------------------------- #
+# bookmark 流程
+# --------------------------------------------------------------------------- #
+def bookmark_flow(
+    site: SiteClient,
+    lib: Library,
+    config: dict[str, Any],
+    *,
+    index: int | None,
+    chapters_spec: str | None,
+    latest: bool,
+    limit: int | None = None,
+) -> None:
+    base = config["base_url"].rstrip("/")
+    resp = site.get(base + BOOKMARK_URL_PATH, expect_login=True)
+    bookmarks = parse_bookmarks(resp.text, base)
+    if not bookmarks:
+        print("收藏夹为空，或页面结构与预期不符。")
+        return
+
+    print(f"共 {len(bookmarks)} 部收藏：")
+    for i, (title, url) in enumerate(bookmarks):
+        print(f"{i} {title}")
+
+    if index is None:
+        try:
+            raw = input("输入序号下载: ").strip()
+            index = int(raw)
+        except (ValueError, EOFError):
+            print("输入无效。")
+            return
+    if index < 0 or index >= len(bookmarks):
+        print(f"序号越界（0-{len(bookmarks) - 1}）。")
+        return
+
+    title, url = bookmarks[index]
+    print(f"选择: {title}")
+    download_manga(
+        site, lib, config, url,
+        chapters_spec=chapters_spec,
+        latest=latest,
+        limit=limit,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# update 流程
+# --------------------------------------------------------------------------- #
+def update_flow(
+    site: SiteClient,
+    lib: Library,
+    config: dict[str, Any],
+    *,
+    auto_download: bool,
+) -> None:
+    records = lib.manga_list()
+    if not records:
+        print("本地库为空，先通过 -url 或 bookmark 下载漫画。")
+        return
+
+    pending: list[tuple[dict[str, Any], list[ChapterRef]]] = []
+    for i, rec in enumerate(records):
+        print(f"{i} {rec.get('title', '?')}")
+        try:
+            resp = site.get(rec["url"])
+            manga = parse_manga_page(resp.text, str(resp.url))
+            local = {c["id"] for c in rec.get("chapters", [])}
+            new_chapters = [c for c in manga.chapters if c.id not in local]
+        except Exception as exc:  # noqa: BLE001
+            print(f"检查失败: {exc}")
+            continue
+        if not new_chapters:
+            print("无更新")
+        else:
+            print("有更新")
+            print(" ".join(c.display for c in new_chapters))
+            pending.append((rec, new_chapters))
+
+    if auto_download and pending:
+        print()
+        for rec, chapters in pending:
+            print(f"下载 {rec['title']} 的新章节 ...")
+            download_manga(
+                site, lib, config, rec["url"], targets=chapters,
+            )
+
+
+# --------------------------------------------------------------------------- #
+# list 流程
+# --------------------------------------------------------------------------- #
+def list_library(lib: Library) -> None:
+    records = lib.manga_list()
+    if not records:
+        print("本地库为空。")
+        return
+    for i, rec in enumerate(records):
+        chapters = rec.get("chapters", [])
+        print(f"{i} {rec.get('title', '?')}  [{len(chapters)} 话]")
+        print(f"   目录: {rec.get('dir', '?')}")

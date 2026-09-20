@@ -1,0 +1,16 @@
+[project]
+name = "rawkuma-dl"
+version = "0.1.0"
+description = "Rawkuma 漫画下载器：命令行爬取 + Rayburst 下载 + JSON 增量库"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "httpx>=0.28.1",
+    "pillow>=12.3.0",
+    "playwright>=1.63.0",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
