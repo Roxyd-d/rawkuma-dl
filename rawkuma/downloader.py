@@ -104,10 +104,19 @@ class Aria2Rpc:
         return self.call(
             "aria2.tellStatus",
             gid,
-            ["gid", "status", "totalLength", "completedLength", "files", "errorMessage"],
+            [
+                "gid",
+                "status",
+                "totalLength",
+                "completedLength",
+                "files",
+                "errorMessage",
+            ],
         )
 
-    def wait(self, gids: list[str], timeout: float, poll: float = 1.0) -> dict[str, dict]:
+    def wait(
+        self, gids: list[str], timeout: float, poll: float = 1.0
+    ) -> dict[str, dict]:
         """轮询至全部任务结束，返回 {gid: status}。"""
         deadline = time.time() + timeout
         remaining = set(gids)
@@ -137,17 +146,29 @@ def chapter_dir_name(label: str, style: str) -> str:
     return f"Chapter {label}"
 
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+
+
+def flat_file_prefix(label: str, style: str) -> str:
+    """扁平布局的文件名前缀：Chapter 6.3 -> Chapter6.3；第6.3话 -> 第6.3话。"""
+    return _sanitize(chapter_dir_name(label, style)).replace(" ", "")
+
+
 def _sanitize(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip(" .")
 
 
-def image_filename(url: str, index: int, pad_digits: int) -> str:
-    """图片下载文件名：0.jpg / 1.png（按序号命名，补零位数由配置决定，默认 1 即不补零）。"""
+def _ext_from_url(url: str) -> str:
     path = urlparse(url).path
     ext = Path(path).suffix.lower()
     if not ext or len(ext) > 5:
         ext = ".jpg"
-    return f"{index:0{pad_digits}d}{ext}"
+    return ext
+
+
+def image_filename(url: str, index: int, pad_digits: int) -> str:
+    """图片下载文件名：0.jpg / 1.png（按序号命名，补零位数由配置决定，默认 1 即不补零）。"""
+    return f"{index:0{pad_digits}d}{_ext_from_url(url)}"
 
 
 def _legacy_name(url: str, index: int, convert: bool) -> str:
@@ -158,11 +179,12 @@ def _legacy_name(url: str, index: int, convert: bool) -> str:
     return name
 
 
-def _convert_to_png(chapter_dir: Path) -> None:
-    """把章节目录里的图片统一转成 PNG（0.png 命名），删除原文件。"""
+def _convert_to_png(chapter_dir: Path, names: list[str]) -> None:
+    """把指定图片文件转成 PNG（同名 .png），删除原文件。"""
     from PIL import Image
 
-    for f in sorted(chapter_dir.iterdir()):
+    for name in names:
+        f = chapter_dir / name
         if f.suffix.lower() in (".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
             target = f.with_suffix(".png")
             with Image.open(f) as im:
@@ -175,26 +197,39 @@ def _plan_tasks(
     ch_dir: Path,
     pad: int,
     convert: bool,
-) -> list[tuple[str, str]]:
-    """规划下载任务：已存在的最终文件跳过；旧命名(000)自动重命名为新命名(0)。
+    prefix: str | None = None,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """规划下载任务。
 
-    返回 [(图片 URL, 下载用文件名)]。
+    - prefix 为空：nested 布局，文件名按序号（0.jpg），并自动把旧 000 命名迁移为新命名；
+    - prefix 非空：flat 布局，文件名带章节前缀（Chapter1_0.jpg）。
+
+    返回 (tasks, present)：tasks=[(图片URL, 下载用文件名)]；
+    present=已存在或已迁移的最终文件名（用于登记入库）。
     """
     tasks: list[tuple[str, str]] = []
+    present: list[str] = []
     for i, url in enumerate(images):
-        task_name = image_filename(url, i, pad)           # 下载时用源扩展名
+        task_name = (
+            f"{prefix}_{i}{_ext_from_url(url)}"
+            if prefix
+            else image_filename(url, i, pad)
+        )
         final_name = task_name
         if convert and Path(task_name).suffix.lower() != ".png":
             final_name = Path(task_name).with_suffix(".png").name  # 交付时转 png
         target = ch_dir / final_name
         if target.exists():
+            present.append(final_name)
             continue
-        legacy = ch_dir / _legacy_name(url, i, convert)
-        if legacy.exists():
-            legacy.rename(target)  # 旧 000 命名 -> 新命名，避免重新下载
-            continue
+        if prefix is None:
+            legacy = ch_dir / _legacy_name(url, i, convert)
+            if legacy.exists():
+                legacy.rename(target)  # 旧 000 命名 -> 新命名，避免重新下载
+                present.append(final_name)
+                continue
         tasks.append((url, task_name))
-    return tasks
+    return tasks, present
 
 
 def download_chapter(
@@ -219,18 +254,28 @@ def download_chapter(
         return result
 
     manga_dir = Path(rec["dir"])
-    ch_dir = manga_dir / _sanitize(chapter_dir_name(chapter.label, config["chapter_dir_style"]))
-    ch_dir.mkdir(parents=True, exist_ok=True)
+    layout = config.get("chapter_layout", "nested")
+    prefix: str | None = None
+    if layout == "flat":
+        # 扁平布局：不建二级文件夹，文件名带章节前缀
+        prefix = flat_file_prefix(chapter.label, config["chapter_dir_style"])
+        ch_dir = manga_dir
+        ch_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        ch_dir = manga_dir / _sanitize(
+            chapter_dir_name(chapter.label, config["chapter_dir_style"])
+        )
+        ch_dir.mkdir(parents=True, exist_ok=True)
 
     dl_cfg = config["downloader"]
     pad = int(config["image_pad_digits"])
     convert = bool(config["convert_to_png"])
 
-    tasks = _plan_tasks(images, ch_dir, pad, convert)
+    tasks, present = _plan_tasks(images, ch_dir, pad, convert, prefix)
     if not tasks:
         result.ok = True
         result.pages = len(images)
-        result.files = sorted(f.name for f in ch_dir.iterdir() if f.is_file())
+        result.files = sorted(set(present))
         result.message = "全部图片已存在，跳过"
         return result
 
@@ -268,12 +313,24 @@ def download_chapter(
         result.message = f"有 {len(failed)} 张图片下载失败: {', '.join(failed[:5])}"
         return result
 
-    if convert:
-        _convert_to_png(ch_dir)
+    # 本次下载成功且落盘的文件名（转换前）
+    downloaded: list[str] = []
+    for gid, task_name in gids.items():
+        st = statuses.get(gid, {})
+        if st.get("status") == "complete" and (ch_dir / task_name).exists():
+            downloaded.append(task_name)
 
+    if convert:
+        _convert_to_png(ch_dir, downloaded)
+
+    result.files = sorted(set(present + downloaded))
+    if convert:
+        result.files = sorted(
+            Path(n).with_suffix(".png").name if Path(n).suffix.lower() != ".png" else n
+            for n in result.files
+        )
     result.ok = True
     result.pages = len(images)
-    result.files = sorted(f.name for f in ch_dir.iterdir() if f.is_file())
     result.message = "完成"
     return result
 
@@ -287,6 +344,6 @@ def _parse_images(site: SiteClient, html: str, page_url: str) -> list[str]:
 def build_rpc(config: dict[str, Any]) -> Aria2Rpc:
     dl_cfg = config["downloader"]
     return Aria2Rpc(
-        rpc_url=dl_cfg.get("rpc_url", "http://127.0.0.1:29100/jsonrpc"),
-        secret=dl_cfg.get("secret", "vghUmcSM2AcODnGK") or "",
+        rpc_url=dl_cfg.get("rpc_url", "http://127.0.0.1:16800/jsonrpc"),
+        secret=dl_cfg.get("secret", "token") or "",
     )

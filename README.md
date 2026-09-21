@@ -8,16 +8,17 @@ JSON 库用于增量下载与更新检查。
 
 - **命令行运行，无需图形界面**；唯一需要浏览器的一步是登录
 - 支持两种下载入口：
-  - `-url <漫画页链接>`：直接按链接下载
-  - `bookmark`：读取收藏夹，按索引选择下载
+    - `-url <漫画页链接>`：直接按链接下载
+    - `bookmark`：读取收藏夹，按索引选择下载
 - 自动增量：已下载过的章节跳过，漫画更新后只补新章节
 - `update` 检查更新，可一键补下新章节
 - 下载记录以 JSON 保存在本地（`library.json`）
+- 支持 nested / flat 两种目录布局，旧项目可一键转换为扁平结构
 
 ## 环境要求
 
 - [uv](https://docs.astral.sh/uv/)（Python 3.12 由 uv 自动管理）
-- [Rayburst](https://rayburst.pages.dev) 桌面端（保持运行，用于实际下载图片）
+- [Rayburst](https://rayburst.pages.dev) 桌面端（保持运行，用于实际下载图片）/ 自行配置 [Aria2 Next](https://github.com/AnInsomniacy/aria2-next)
 
 ## 安装
 
@@ -63,6 +64,7 @@ uv run main.py update
 | `uv run main.py bookmark` | 打印收藏夹列表并交互选择序号下载；`--index N` 可直接指定 |
 | `uv run main.py update` | 逐部检查更新；`--download` 自动补下新章节 |
 | `uv run main.py list` | 查看本地库 |
+| `uv run main.py convert` | 交互选择漫画并转换目录结构；`--mode` 可选 `flat` / `nested`（默认 `flat`），`--index N` 可直接指定 |
 
 可选参数（配合 `-url` / `bookmark`）：
 
@@ -72,6 +74,8 @@ uv run main.py update
 - `--root <目录>`：覆盖下载根目录
 
 ## 下载目录结构
+
+默认 **nested（二级文件夹）**：
 
 ```
 downloads/
@@ -85,38 +89,59 @@ downloads/
     └── ...
 ```
 
+也可切换为 **flat（扁平，不建二级文件夹，文件名带章节前缀）**：
+
+```
+downloads/
+└── Saikyou De Modori Chuunen Boukensha wa, Imasara Inochi Nante Kaketakunai/
+    ├── Chapter1_0.jpg
+    ├── Chapter1_1.jpg
+    ├── ...
+    ├── Chapter7.1_0.jpg
+    └── ...
+```
+
 说明：
 
-- 章节目录默认使用站点标签（`Chapter 1`、`Chapter 6.3`）；如希望用中文「第N话」，
+- 章节目录名默认使用站点标签（`Chapter 1`、`Chapter 6.3`）；如希望用中文「第N话」，
   将 `config.json` 的 `chapter_dir_style` 改为 `"cn"`
-- 可设置 `image_pad_digits` 为 3，图片文件按序号补零命名（`000`、`001`…），扩展名保留源图格式（站点为 jpg）；
+- 图片文件从 `0` 开始顺序编号（`0`、`1`、`2`…`10`…），扩展名保留源图格式（站点为 jpg）；
+  如需补零，可将 `config.json` 的 `image_pad_digits` 设为 `3`（`000`、`001`…）；
   如需统一为 `.png`，把 `config.json` 的 `convert_to_png` 设为 `true`（下载后自动转换）
+- 目录布局由 `config.json` 的 `chapter_layout` 控制：`"nested"`（二级文件夹）或 `"flat"`（扁平）
+- 旧版本下载的 `000`、`001`… 命名文件会在下次运行时自动改名为新命名，无需重新下载
+- **旧项目转换**：`uv run main.py convert` 会先列出本地库漫画，输入序号后把该漫画的
+  二级文件夹结构重命名为扁平结构（`Chapter 1/0.jpg` → `Chapter1_0.jpg`），并同步更新
+  `library.json`；也可用 `uv run main.py convert --index 0` 直接指定。转换完成后自动把
+  `chapter_layout` 设为 `"flat"`，后续新下载沿用扁平结构
 
 ## 配置（config.json，首次运行自动生成）
 
 ```json
 {
-  "base_url": "https://rawkuma.net",
-  "cookies_file": "cookies.json",
-  "library_file": "library.json",
-  "download_root": "downloads",
-  "downloader": {
-    "backend": "aria2",
-    "rpc_url": "http://127.0.0.1:16800/jsonrpc",
-    "secret": "token",
-    "poll_interval": 1.0,
-    "task_timeout": 600,
-    "connections_per_server": 4
-  },
-  "chapter_dir_style": "site",
-  "image_pad_digits": 3,
-  "convert_to_png": false
+    "base_url": "https://rawkuma.net",
+    "cookies_file": "cookies.json",
+    "library_file": "library.json",
+    "download_root": "downloads",
+    "downloader": {
+        "backend": "aria2",
+        "rpc_url": "http://127.0.0.1:16800/jsonrpc",
+        "secret": "token",
+        "poll_interval": 1.0,
+        "task_timeout": 600,
+        "connections_per_server": 4
+    },
+    "chapter_dir_style": "site",
+    "chapter_layout": "nested",
+    "image_pad_digits": 1,
+    "convert_to_png": false
 }
 ```
 
 - `downloader`：对接 Rayburst 的 Aria2 Next 兼容 JSON-RPC。若 Rayburst 的 RPC 端口/密钥不同，
   在应用设置里查看后修改这两项即可；`secret` 留空表示无密钥
 - `download_root`：下载根目录（相对项目根目录）
+- `chapter_layout`：`"nested"`（默认，二级文件夹）或 `"flat"`（扁平，文件名带章节前缀）
 
 ## 更新检查原理
 

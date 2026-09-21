@@ -5,6 +5,7 @@
     uv run main.py -url https://rawkuma.net/manga/<slug>/
     uv run main.py bookmark
     uv run main.py update
+    uv run main.py convert
     uv run main.py login
 """
 

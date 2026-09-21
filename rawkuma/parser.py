@@ -38,9 +38,9 @@ def parse_bookmark_api_url(html: str) -> str | None:
 
 @dataclass
 class ChapterRef:
-    id: str          # 站点章节数字 ID（用于更新比对）
-    label: str       # 章节标签，如 "6.3"
-    url: str         # 章节页地址
+    id: str  # 站点章节数字 ID（用于更新比对）
+    label: str  # 章节标签，如 "6.3"
+    url: str  # 章节页地址
     title: str = ""  # 展示名，如 "Chapter 6.3"
 
     @property
@@ -159,8 +159,18 @@ def parse_bookmarks(html: str, base_url: str) -> list[tuple[str, str]]:
 
 # 卡片里的角标/类型小图标 alt，不能当作漫画名
 BADGE_ALTS = {
-    "manga", "manhwa", "manhua", "comic", "logo", "icon", "svg",
-    "bookmark", "reading", "history", "image", "img",
+    "manga",
+    "manhwa",
+    "manhua",
+    "comic",
+    "logo",
+    "icon",
+    "svg",
+    "bookmark",
+    "reading",
+    "history",
+    "image",
+    "img",
 }
 
 

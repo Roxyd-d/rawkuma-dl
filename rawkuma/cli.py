@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,16 +30,18 @@ def build_parser() -> argparse.ArgumentParser:
         description="Rawkuma 漫画下载器（命令行；登录使用浏览器）",
     )
     p.add_argument(
-        "-url", "--url",
+        "-url",
+        "--url",
         metavar="MANGA_URL",
         help="漫画详情页链接，下载该漫画（如 -url https://rawkuma.net/manga/<slug>/）",
     )
     p.add_argument(
         "command",
         nargs="?",
-        choices=["login", "bookmark", "update", "list"],
+        choices=["login", "bookmark", "update", "list", "convert"],
         help="子命令: login=浏览器登录; bookmark=按收藏夹索引下载; "
-        "update=检查更新; list=查看本地库",
+        "update=检查更新; list=查看本地库; "
+        "convert=交互选择漫画并转换为扁平结构（--index N 可直接指定）",
     )
     p.add_argument(
         "--chapters",
@@ -57,7 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--index",
         type=int,
-        help="bookmark 时直接指定序号（跳过交互选择）",
+        help="bookmark / convert 时直接指定序号（跳过交互选择）",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["flat", "nested"],
+        default="flat",
+        help="convert 的转换模式：flat=旧结构(二级文件夹)转扁平（默认）；"
+        "nested=扁平转回二级文件夹",
     )
     p.add_argument(
         "--limit",
@@ -89,11 +99,17 @@ def main(argv: list[str] | None = None) -> None:
         list_library(lib)
         return
 
+    if args.command == "convert":
+        convert_flow(lib, config, index=args.index, mode=args.mode)
+        return
+
     try:
         with SiteClient(config, cookies_path) as site:
             if args.url:
                 download_manga(
-                    site, lib, config,
+                    site,
+                    lib,
+                    config,
                     manga_url=args.url,
                     chapters_spec=args.chapters,
                     latest=args.latest,
@@ -101,7 +117,9 @@ def main(argv: list[str] | None = None) -> None:
                 )
             elif args.command == "bookmark":
                 bookmark_flow(
-                    site, lib, config,
+                    site,
+                    lib,
+                    config,
                     index=args.index,
                     chapters_spec=args.chapters,
                     latest=args.latest,
@@ -143,7 +161,9 @@ def download_manga(
     lib.save()
 
     if targets is None:
-        targets = _select_targets(manga, lib, chapters_spec=chapters_spec, latest=latest)
+        targets = _select_targets(
+            manga, lib, chapters_spec=chapters_spec, latest=latest
+        )
     if limit and limit > 0:
         targets = targets[:limit]
 
@@ -177,9 +197,172 @@ def download_manga(
 
 
 def _chapter_dir(manga_dir: Path, chapter: ChapterRef, config: dict[str, Any]) -> Path:
+    if config.get("chapter_layout") == "flat":
+        return manga_dir  # 扁平布局：图片直接放在漫画根目录
     from .downloader import chapter_dir_name
 
-    return manga_dir / _sanitize(chapter_dir_name(chapter.label, config["chapter_dir_style"]))
+    return manga_dir / _sanitize(
+        chapter_dir_name(chapter.label, config["chapter_dir_style"])
+    )
+
+
+def convert_flow(
+    lib: Library,
+    config: dict[str, Any],
+    index: int | None = None,
+    mode: str = "flat",
+) -> None:
+    """转换本地漫画的目录结构。
+
+    mode="flat"：旧版二级文件夹（<漫画>/Chapter 1/0.png）→ 扁平（<漫画>/Chapter1_0.png）；
+    mode="nested"：扁平 → 二级文件夹。
+
+    默认像 bookmark 一样：列出本地库漫画并交互选择序号；--index N 可直接指定。
+    转换依据 library.json 中的章节记录定位目录；重命名后更新记录。
+    成功转换后自动把 config.json 的 chapter_layout 设为与 mode 一致。
+    """
+    import json
+
+    from .config import DEFAULT_CONFIG_PATH
+    from .downloader import IMAGE_EXTS, flat_file_prefix
+
+    if mode not in ("flat", "nested"):
+        print(f"未知转换模式: {mode}（可选 flat / nested）")
+        return
+
+    records = lib.manga_list()
+    if not records:
+        print("本地库为空，无需转换。")
+        return
+    if index is None:
+        for i, rec in enumerate(records):
+            print(f"{i} {rec.get('title', '?')}")
+        try:
+            raw = input("输入序号转换: ").strip()
+            index = int(raw)
+        except (ValueError, EOFError):
+            print("输入无效。")
+            return
+    if index < 0 or index >= len(records):
+        print(f"序号越界（0-{len(records) - 1}）。")
+        return
+    records = [records[index]]
+
+    def _num_key(name: str) -> tuple[int, str]:
+        m = re.match(r"(\d+)", name)
+        return (int(m.group(1)) if m else 0, name)
+
+    def _flatten(rec: dict[str, Any], manga_dir: Path) -> int:
+        """二级文件夹 -> 扁平：Chapter 1/0.png -> Chapter1_0.png"""
+        total = 0
+        for ch in rec.get("chapters", []):
+            old_dir = Path(ch.get("dir", ""))
+            if old_dir == manga_dir or not old_dir.is_dir():
+                continue  # 已是扁平结构，或目录缺失
+            prefix = flat_file_prefix(
+                ch.get("label", ""), config.get("chapter_dir_style", "site")
+            )
+            files = sorted(
+                (
+                    f
+                    for f in old_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+                ),
+                key=lambda f: _num_key(f.stem),
+            )
+            renamed: list[str] = []
+            for i, f in enumerate(files):
+                target = manga_dir / f"{prefix}_{i}{f.suffix.lower()}"
+                if target.exists():
+                    print(f"  {target.name} 已存在，跳过（不覆盖）")
+                    continue
+                f.rename(target)
+                renamed.append(target.name)
+            try:
+                old_dir.rmdir()  # 删除空目录；含非图片文件时保留
+            except OSError:
+                pass
+            if renamed:
+                ch["dir"] = str(manga_dir)
+                ch["files"] = renamed
+                total += len(renamed)
+                print(
+                    f"  {ch.get('label', '?')}: {len(renamed)} 个文件 -> {prefix}_0 … {prefix}_{len(renamed) - 1}"
+                )
+        return total
+
+    def _nest(rec: dict[str, Any], manga_dir: Path) -> int:
+        """扁平 -> 二级文件夹：Chapter1_0.png -> Chapter 1/0.png"""
+        from .downloader import _sanitize, chapter_dir_name
+
+        total = 0
+        pad = int(config.get("image_pad_digits", 1))
+        for ch in rec.get("chapters", []):
+            label = ch.get("label", "")
+            prefix = flat_file_prefix(label, config.get("chapter_dir_style", "site"))
+            ch_dir = manga_dir / _sanitize(
+                chapter_dir_name(label, config.get("chapter_dir_style", "site"))
+            )
+            files = sorted(
+                (
+                    f
+                    for f in manga_dir.iterdir()
+                    if f.is_file()
+                    and f.name.startswith(prefix + "_")
+                    and f.suffix.lower() in IMAGE_EXTS
+                ),
+                key=lambda f: _num_key(f.name[len(prefix) + 1 :]),  # 按前缀后的序号排序
+            )
+            if not files:
+                continue  # 该章节已是嵌套结构或没有匹配文件
+            ch_dir.mkdir(parents=True, exist_ok=True)
+            renamed: list[str] = []
+            for i, f in enumerate(files):
+                target = ch_dir / f"{i:0{pad}d}{f.suffix.lower()}"
+                if target.exists():
+                    print(f"  {target.name} 已存在，跳过（不覆盖）")
+                    continue
+                f.rename(target)
+                renamed.append(target.name)
+            if renamed:
+                ch["dir"] = str(ch_dir)
+                ch["files"] = renamed
+                total += len(renamed)
+                print(
+                    f"  {label}: {len(renamed)} 个文件 -> {ch_dir.name}/{renamed[0]} …"
+                )
+        return total
+
+    style = config.get("chapter_dir_style", "site")
+    total = 0
+    for rec in records:
+        manga_dir = Path(rec["dir"])
+        if not manga_dir.is_dir():
+            print(f"跳过 {rec.get('title', '?')}：目录不存在 {manga_dir}")
+            continue
+        desc = "旧结构→扁平" if mode == "flat" else "扁平→旧结构"
+        print(f"转换: {rec.get('title', '?')}（{desc}）")
+        if mode == "flat":
+            total += _flatten(rec, manga_dir)
+        else:
+            total += _nest(rec, manga_dir)
+    lib.save()
+
+    if total:
+        p = Path(DEFAULT_CONFIG_PATH)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if data.get("chapter_layout") != mode:
+                data["chapter_layout"] = mode
+                p.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                print(
+                    f"已将 config.json 的 chapter_layout 设为 {mode}（后续新下载同样使用该结构）"
+                )
+        print(f"完成，共转换 {total} 个文件。")
+    else:
+        print("没有可转换的章节（可能已是目标结构）。")
 
 
 def _select_targets(
@@ -230,7 +413,9 @@ def bookmark_flow(
     resp = site.get(base + BOOKMARK_URL_PATH, expect_login=True)
     bookmarks = _fetch_bookmarks(site, resp.text, base)
     if not bookmarks:
-        print("收藏夹为空；若已收藏内容，Cookie 可能已过期，请重新运行 uv run main.py login。")
+        print(
+            "收藏夹为空；若已收藏内容，Cookie 可能已过期，请重新运行 uv run main.py login。"
+        )
         return
 
     # 收藏夹片段里的标题可能被截断/取到角标，从详情页补全权威完整标题
@@ -256,14 +441,19 @@ def bookmark_flow(
     title, url = bookmarks[index]
     print(f"选择: {title}")
     download_manga(
-        site, lib, config, url,
+        site,
+        lib,
+        config,
+        url,
         chapters_spec=chapters_spec,
         latest=latest,
         limit=limit,
     )
 
 
-def _fetch_bookmarks(site: SiteClient, page_html: str, base: str) -> list[tuple[str, str]]:
+def _fetch_bookmarks(
+    site: SiteClient, page_html: str, base: str
+) -> list[tuple[str, str]]:
     """收藏夹列表由 htmx 异步加载：先提取接口地址，再分页拉取并解析。
 
     接口: admin-ajax.php?nonce=...&user_id=...&action=get_bookmarks&type=all[&page=N]
@@ -352,7 +542,11 @@ def update_flow(
         for rec, chapters in pending:
             print(f"下载 {rec['title']} 的新章节 ...")
             download_manga(
-                site, lib, config, rec["url"], targets=chapters,
+                site,
+                lib,
+                config,
+                rec["url"],
+                targets=chapters,
             )
 
 

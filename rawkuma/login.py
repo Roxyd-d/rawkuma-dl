@@ -102,9 +102,7 @@ def run_login(config: dict[str, Any], cookies_path: Path) -> bool:
 
         # 收集本站相关 Cookie（不采集其它站点/敏感信息）
         cookies = [
-            c
-            for c in context.cookies()
-            if "rawkuma.net" in (c.get("domain") or "")
+            c for c in context.cookies() if "rawkuma.net" in (c.get("domain") or "")
         ]
         save_cookies(cookies_path, cookies)
         print(f"登录成功，Cookie 已保存到 {cookies_path}（{len(cookies)} 条）")
