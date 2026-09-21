@@ -29,7 +29,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 后端协议：aria2 = aria2 兼容 JSON-RPC（Rayburst/Motrix 桌面端均支持）
         "backend": "aria2",
         "rpc_url": "http://127.0.0.1:29100/jsonrpc",
-        "secret": "vghUmcSM2AcODnGK",
+        "secret": "token",
         # 轮询下载状态间隔（秒）
         "poll_interval": 1.0,
         # 单个章节整体下载超时（秒）
