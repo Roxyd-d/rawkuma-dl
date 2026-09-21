@@ -1,38 +1,64 @@
 name: Build rawkuma‑dl EXE
 on:
-    push:
-        branches: [main]
-    workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
-    build:
-        runs-on: windows-latest
-        steps:
-            - name: Checkout source code
-              uses: actions/checkout@v4
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-            - name: Setup Python
-              uses: actions/setup-python@v5
-              with:
-                  python-version: "3.12"
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-            - name: Install uv
-              run: |
-                  python -m pip install --upgrade pip
-                  pip install uv
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
 
-            - name: Sync dependencies (uv)
-              run: uv sync --frozen
+      - name: Sync dependencies (uv)
+        run: uv sync --frozen
 
-            - name: Install pyinstaller
-              run: uv pip install pyinstaller
+      - name: Install pyinstaller
+        run: uv pip install pyinstaller
 
-            - name: Build single EXE
-              run: |
-                  uv run pyinstaller -F main.py
+      - name: Build single EXE
+        run: |
+          uv run pyinstaller -F main.py
 
-            - name: Upload compiled exe artifact
-              uses: actions/upload-artifact@v4
-              with:
-                  name: rawkuma-dl-windows-exe
-                  path: dist/*.exe
+      # 临时制品，测试打包时下载用；tag触发时下面release步骤会上传exe
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        if: github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: rawkuma-dl-windows-exe
+          path: dist/*.exe
+
+      # 仅在推送tag时执行：自动创建Release并上传exe
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            ## rawkuma-dl ${{ github.ref_name }}
+            自动打包发布版本
+            ### 使用步骤
+            1. 下载 rawkuma-dl.exe
+            2. 打开CMD执行：`playwright install msedge`
+            3. 运行 `rawkuma-dl.exe login` 登录获取Cookie
+            > Cookie保存在本地cookies.json，不会内置在程序内
+          files: |
+            dist/*.exe
