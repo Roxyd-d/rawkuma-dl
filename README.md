@@ -1,7 +1,7 @@
 # Rawkuma 漫画下载器
 
 对 [rawkuma.net](https://rawkuma.net) 的漫画进行命令行爬取，图片下载交给第三方下载器
-[Rayburst](https://rayburst.pages.dev)（开源下载管理器，底层为 Aria2），并维护一份本地
+[Rayburst](https://rayburst.pages.dev)（开源下载管理器，底层为 Aria2 Next），并维护一份本地
 JSON 库用于增量下载与更新检查。
 
 ## 特性
@@ -77,8 +77,8 @@ uv run main.py update
 downloads/
 └── Saikyou De Modori Chuunen Boukensha wa, Imasara Inochi Nante Kaketakunai/
     ├── Chapter 1/
-    │   ├── 000.jpg
-    │   ├── 001.jpg
+    │   ├── 0.jpg
+    │   ├── 1.jpg
     │   └── ...
     ├── Chapter 2.1/
     │   └── ...
@@ -89,7 +89,7 @@ downloads/
 
 - 章节目录默认使用站点标签（`Chapter 1`、`Chapter 6.3`）；如希望用中文「第N话」，
   将 `config.json` 的 `chapter_dir_style` 改为 `"cn"`
-- 图片文件按序号补零命名（`000`、`001`…），扩展名保留源图格式（站点为 jpg）；
+- 可设置 `image_pad_digits` 为 3，图片文件按序号补零命名（`000`、`001`…），扩展名保留源图格式（站点为 jpg）；
   如需统一为 `.png`，把 `config.json` 的 `convert_to_png` 设为 `true`（下载后自动转换）
 
 ## 配置（config.json，首次运行自动生成）
@@ -114,7 +114,7 @@ downloads/
 }
 ```
 
-- `downloader`：对接 Rayburst 的 aria2 兼容 JSON-RPC。若 Rayburst 的 RPC 端口/密钥不同，
+- `downloader`：对接 Rayburst 的 Aria2 Next 兼容 JSON-RPC。若 Rayburst 的 RPC 端口/密钥不同，
   在应用设置里查看后修改这两项即可；`secret` 留空表示无密钥
 - `download_root`：下载根目录（相对项目根目录）
 

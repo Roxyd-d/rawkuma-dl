@@ -24,14 +24,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "library_file": "library.json",
     # 漫画下载根目录
     "download_root": "downloads",
-    # 第三方下载器（Rayburst，底层 Aria2）RPC 配置
+    # Aria2 RPC 配置
     "downloader": {
         # 后端协议：aria2 = aria2 兼容 JSON-RPC（Rayburst/Motrix 桌面端均支持）
         "backend": "aria2",
-        # Rayburst 默认监听 127.0.0.1:16800/jsonrpc；可在 Rayburst 设置里核对
-        "rpc_url": "http://172.20.207.72:6800/jsonrpc",
-        # RPC 密钥；Rayburst/Motrix 默认 "token"，如设置为空则不传 token
-        "secret": "123456",
+        "rpc_url": "http://127.0.0.1:29100/jsonrpc",
+        "secret": "vghUmcSM2AcODnGK",
         # 轮询下载状态间隔（秒）
         "poll_interval": 1.0,
         # 单个章节整体下载超时（秒）
@@ -41,9 +39,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     # 章节目录命名：site=站点标签(Chapter 1) / cn=第N话
     "chapter_dir_style": "site",
-    # 图片文件名补零位数：3 -> 000.jpg, 001.jpg ...
-    "image_pad_digits": 3,
-    # 下载完成后是否转成 PNG（源图通常是 jpg；True 时输出 000.png 并删除源文件）
+    # 图片文件名补零位数：1 -> 0.jpg, 3 -> 000.jpg
+    "image_pad_digits": 1,
+    # 下载完成后是否转成 PNG（源图通常是 jpg；True 时输出 0.png 并删除源文件）
     "convert_to_png": True,
 }
 

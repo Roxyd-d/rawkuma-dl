@@ -32,11 +32,9 @@ def run_login(config: dict[str, Any], cookies_path: Path) -> bool:
         browser = None
         launch_kwargs: dict[str, Any] = {
             "headless": False,
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-            ],
+            "args": ["--disable-blink-features=AutomationControlled"],
         }
-        # 优先使用系统浏览器，其次 Playwright
+        # 优先使用系统浏览器，其次 Playwright 自带 Chromium
         for channel in ("chrome", "msedge"):
             try:
                 browser = p.chromium.launch(**launch_kwargs, channel=channel)
@@ -45,10 +43,12 @@ def run_login(config: dict[str, Any], cookies_path: Path) -> bool:
                 continue
         if browser is None:
             try:
-                browser = p.chromium.launch(**launch_kwargs, channel="msedge")
+                browser = p.chromium.launch(**launch_kwargs)
             except Exception as exc:
                 print(
-                    "无法启动浏览器。请先安装 Microsoft Edge:  uv run playwright install msedge"
+                    "无法启动浏览器。请先安装浏览器内核，任选其一：\n"
+                    "  uv run playwright install chromium\n"
+                    "  uv run playwright install msedge"
                 )
                 print(f"原始错误: {exc}")
                 return False
@@ -102,7 +102,9 @@ def run_login(config: dict[str, Any], cookies_path: Path) -> bool:
 
         # 收集本站相关 Cookie（不采集其它站点/敏感信息）
         cookies = [
-            c for c in context.cookies() if "rawkuma.net" in (c.get("domain") or "")
+            c
+            for c in context.cookies()
+            if "rawkuma.net" in (c.get("domain") or "")
         ]
         save_cookies(cookies_path, cookies)
         print(f"登录成功，Cookie 已保存到 {cookies_path}（{len(cookies)} 条）")

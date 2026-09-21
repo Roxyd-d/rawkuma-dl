@@ -142,7 +142,7 @@ def _sanitize(name: str) -> str:
 
 
 def image_filename(url: str, index: int, pad_digits: int) -> str:
-    """图片下载文件名：000.jpg（保留源扩展名，补零编号）。"""
+    """图片下载文件名：0.jpg / 1.png（按序号命名，补零位数由配置决定，默认 1 即不补零）。"""
     path = urlparse(url).path
     ext = Path(path).suffix.lower()
     if not ext or len(ext) > 5:
@@ -150,8 +150,16 @@ def image_filename(url: str, index: int, pad_digits: int) -> str:
     return f"{index:0{pad_digits}d}{ext}"
 
 
+def _legacy_name(url: str, index: int, convert: bool) -> str:
+    """旧版本命名：3 位补零（000.jpg / 000.png），用于自动迁移已下载章节。"""
+    name = image_filename(url, index, 3)
+    if convert and Path(name).suffix.lower() != ".png":
+        name = Path(name).with_suffix(".png").name
+    return name
+
+
 def _convert_to_png(chapter_dir: Path) -> None:
-    """把章节目录里的图片统一转成 PNG（000.png 命名），删除原文件。"""
+    """把章节目录里的图片统一转成 PNG（0.png 命名），删除原文件。"""
     from PIL import Image
 
     for f in sorted(chapter_dir.iterdir()):
@@ -160,6 +168,33 @@ def _convert_to_png(chapter_dir: Path) -> None:
             with Image.open(f) as im:
                 im.convert("RGB").save(target, "PNG")
             f.unlink()
+
+
+def _plan_tasks(
+    images: list[str],
+    ch_dir: Path,
+    pad: int,
+    convert: bool,
+) -> list[tuple[str, str]]:
+    """规划下载任务：已存在的最终文件跳过；旧命名(000)自动重命名为新命名(0)。
+
+    返回 [(图片 URL, 下载用文件名)]。
+    """
+    tasks: list[tuple[str, str]] = []
+    for i, url in enumerate(images):
+        task_name = image_filename(url, i, pad)           # 下载时用源扩展名
+        final_name = task_name
+        if convert and Path(task_name).suffix.lower() != ".png":
+            final_name = Path(task_name).with_suffix(".png").name  # 交付时转 png
+        target = ch_dir / final_name
+        if target.exists():
+            continue
+        legacy = ch_dir / _legacy_name(url, i, convert)
+        if legacy.exists():
+            legacy.rename(target)  # 旧 000 命名 -> 新命名，避免重新下载
+            continue
+        tasks.append((url, task_name))
+    return tasks
 
 
 def download_chapter(
@@ -191,16 +226,7 @@ def download_chapter(
     pad = int(config["image_pad_digits"])
     convert = bool(config["convert_to_png"])
 
-    # 已存在的文件直接跳过（按最终交付文件名判断）
-    tasks: list[tuple[str, str]] = []
-    for i, url in enumerate(images):
-        task_name = image_filename(url, i, pad)          # 下载时用源扩展名
-        final_name = task_name
-        if convert and Path(task_name).suffix.lower() != ".png":
-            final_name = Path(task_name).with_suffix(".png").name  # 交付时转 png
-        if (ch_dir / final_name).exists():
-            continue
-        tasks.append((url, task_name))
+    tasks = _plan_tasks(images, ch_dir, pad, convert)
     if not tasks:
         result.ok = True
         result.pages = len(images)
@@ -261,8 +287,6 @@ def _parse_images(site: SiteClient, html: str, page_url: str) -> list[str]:
 def build_rpc(config: dict[str, Any]) -> Aria2Rpc:
     dl_cfg = config["downloader"]
     return Aria2Rpc(
-        # rpc_url=dl_cfg.get("rpc_url", "http://127.0.0.1:16800/jsonrpc"),
-        # secret=dl_cfg.get("secret", "token") or "",
-        rpc_url="http://127.0.0.1:29100/jsonrpc",
-        secret="vghUmcSM2AcODnGK",
+        rpc_url=dl_cfg.get("rpc_url", "http://127.0.0.1:29100/jsonrpc"),
+        secret=dl_cfg.get("secret", "vghUmcSM2AcODnGK") or "",
     )

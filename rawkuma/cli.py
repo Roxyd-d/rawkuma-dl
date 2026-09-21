@@ -12,7 +12,13 @@ from .config import PROJECT_ROOT, load_config, resolve_path
 from .downloader import build_rpc, download_chapter, _sanitize
 from .library import Library
 from .login import run_login
-from .parser import ChapterRef, MangaInfo, parse_bookmarks, parse_manga_page
+from .parser import (
+    ChapterRef,
+    MangaInfo,
+    parse_bookmark_api_url,
+    parse_bookmarks,
+    parse_manga_page,
+)
 
 BOOKMARK_URL_PATH = "/bookmark/"
 
@@ -222,10 +228,15 @@ def bookmark_flow(
 ) -> None:
     base = config["base_url"].rstrip("/")
     resp = site.get(base + BOOKMARK_URL_PATH, expect_login=True)
-    bookmarks = parse_bookmarks(resp.text, base)
+    bookmarks = _fetch_bookmarks(site, resp.text, base)
     if not bookmarks:
-        print("收藏夹为空，或页面结构与预期不符。")
+        print("收藏夹为空；若已收藏内容，Cookie 可能已过期，请重新运行 uv run main.py login。")
         return
+
+    # 收藏夹片段里的标题可能被截断/取到角标，从详情页补全权威完整标题
+    if len(bookmarks) > 1:
+        print("获取完整标题 ...", flush=True)
+    bookmarks = _enrich_titles(site, bookmarks)
 
     print(f"共 {len(bookmarks)} 部收藏：")
     for i, (title, url) in enumerate(bookmarks):
@@ -250,6 +261,57 @@ def bookmark_flow(
         latest=latest,
         limit=limit,
     )
+
+
+def _fetch_bookmarks(site: SiteClient, page_html: str, base: str) -> list[tuple[str, str]]:
+    """收藏夹列表由 htmx 异步加载：先提取接口地址，再分页拉取并解析。
+
+    接口: admin-ajax.php?nonce=...&user_id=...&action=get_bookmarks&type=all[&page=N]
+    """
+    api_url = parse_bookmark_api_url(page_html)
+    if not api_url:
+        # 老结构兜底：直接解析页面内链接
+        return parse_bookmarks(page_html, base)
+
+    bookmarks: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    sep = "&" if "?" in api_url else "?"
+    for page in range(1, 101):  # 安全上限，正常会在空页提前退出
+        url = f"{api_url}{sep}type=all"
+        if page > 1:
+            url += f"&page={page}"
+        frag = site.get(url)
+        items = parse_bookmarks(frag.text, base)
+        if not items:
+            break
+        fresh = [(t, u) for t, u in items if u not in seen]
+        bookmarks.extend(fresh)
+        seen.update(u for _, u in fresh)
+        if len(fresh) < len(items):  # 本页全是重复 -> 已到末尾
+            break
+    return bookmarks
+
+
+def _enrich_titles(
+    site: SiteClient,
+    bookmarks: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """从每部漫画的详情页抓取权威完整标题，失败时保留原标题。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch(item: tuple[str, str]) -> tuple[str, str]:
+        _, url = item
+        try:
+            r = site.get(url)
+            manga = parse_manga_page(r.text, str(r.url))
+            if manga.title:
+                return (manga.title, url)
+        except Exception:  # noqa: BLE001 - 单条失败不影响整体
+            pass
+        return item
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        return list(ex.map(fetch, bookmarks))
 
 
 # --------------------------------------------------------------------------- #

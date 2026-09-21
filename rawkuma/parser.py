@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from html import unescape as html_unescape
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -15,6 +16,24 @@ CHAPTER_RE = re.compile(
 )
 NUM_RE = re.compile(r"(\d+)(?:\.(\d+))?")
 IMG_RE = re.compile(r"https://rcdn\.kyut\.dev/\S+\.(?:jpg|jpeg|png|webp|gif|avif)")
+# 收藏夹列表由 htmx 异步加载，接口地址内嵌在收藏夹页 HTML 中
+BOOKMARK_AJAX_RE = re.compile(
+    r"https://rawkuma\.net/wp-admin/admin-ajax\.php\?[^\"']*action=get_bookmarks"
+)
+
+
+def parse_bookmark_api_url(html: str) -> str | None:
+    """从收藏夹页提取 get_bookmarks 接口地址（含 nonce/user_id）。
+
+    该列表不在初始 HTML 里，需直接请求接口获取：
+    admin-ajax.php?nonce=...&user_id=...&action=get_bookmarks&type=all[&page=N]
+    """
+    m = BOOKMARK_AJAX_RE.search(html)
+    if not m:
+        return None
+    url = html_unescape(m.group(0))
+    # 去掉可能残留的 type=/page= 参数，由调用方统一追加
+    return re.sub(r"[&?](?:type|page)=[^&]*", "", url)
 
 
 @dataclass
@@ -135,24 +154,35 @@ def parse_bookmarks(html: str, base_url: str) -> list[tuple[str, str]]:
         if not title:
             continue
         seen[href] = title
-    return list(seen.items())
+    return [(title, href) for href, title in seen.items()]
+
+
+# 卡片里的角标/类型小图标 alt，不能当作漫画名
+BADGE_ALTS = {
+    "manga", "manhwa", "manhua", "comic", "logo", "icon", "svg",
+    "bookmark", "reading", "history", "image", "img",
+}
 
 
 def _manga_card_title(a, href: str) -> str:
-    """从收藏夹卡片里提取漫画名。"""
-    # 1) 卡片内标题类元素（首页/收藏夹通用的 line-clamp 标题 span）
-    for sel in ("span.line-clamp", "[class*='line-clamp']", "h2", "h3", "h4"):
+    """从收藏夹卡片里提取漫画名（优先标题元素，其次封面 alt，最后链接文本）。"""
+    # 1) 卡片内标题类元素（line-clamp 标题）
+    for sel in ("[class*='line-clamp']", "h2", "h3", "h4"):
         node = a.select_one(sel)
         if node:
             t = _clean(node.get_text())
             if t:
                 return t
-    # 2) 封面图 alt
-    img = a.find("img", alt=True)
-    if img and _clean(img["alt"]):
+    # 2) 封面图 alt：排除角标小图标，取最长的候选（封面 alt 即完整漫画名）
+    best = ""
+    for img in a.find_all("img", alt=True):
         t = _clean(img["alt"])
-        if "logo" not in t.lower():
-            return t
+        if not t or t.lower() in BADGE_ALTS or len(t) < 5:
+            continue
+        if len(t) > len(best):
+            best = t
+    if best:
+        return best
     # 3) 链接整体文本（去掉 "Start Reading" 等干扰）
     t = _clean(a.get_text(" "))
     for junk in ("Start Reading", "Read Now"):
