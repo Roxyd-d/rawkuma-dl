@@ -11,7 +11,7 @@ JSON 库用于增量下载与更新检查。
     - `-url <漫画页链接>`：直接按链接下载
     - `bookmark`：读取收藏夹，按索引选择下载
 - 自动增量：已下载过的章节跳过，漫画更新后只补新章节
-- `update` 检查更新，可一键补下新章节
+- `update` 检查更新，发现新章节时询问是否下载（`--download` 直接自动下载）
 - 下载记录以 JSON 保存在本地（`library.json`）
 - 支持 nested / flat 两种目录布局，旧项目可一键转换为扁平结构
 
@@ -48,11 +48,20 @@ uv run main.py bookmark
 # 1 Hazure Skill "Soine" ga Kakuseishi, ...
 # 输入序号下载: 0
 
-# 检查更新
+# 检查更新（新章节先下载到漫画目录的 update/ 子文件夹）
 uv run main.py update
 # 0 Saikyou De Modori ...
 # 有更新
 # Chapter 27.1 Chapter 27.2 Chapter 27.3
+# 是否下载新章节？(y/N): y
+
+# 不想交互：--download 直接自动下载新章节
+uv run main.py update --download
+
+# 下载完成后询问是否把 update/ 内容合并到正式目录
+uv run main.py update --merge
+# ...
+# 是否合并 update 内容到正式目录？(y/N): y
 ```
 
 ## 命令参考
@@ -62,7 +71,7 @@ uv run main.py update
 | `uv run main.py login` | 打开浏览器登录，保存 Cookie 到 `cookies.json` |
 | `uv run main.py -url <链接>` | 下载指定漫画（自动跳过已下载章节） |
 | `uv run main.py bookmark` | 打印收藏夹列表并交互选择序号下载；`--index N` 可直接指定 |
-| `uv run main.py update` | 逐部检查更新；`--download` 自动补下新章节 |
+| `uv run main.py update` | 逐部检查更新，发现更新后询问是否下载；新章节下载到漫画目录的 `update/` 子文件夹；`--download` 直接自动下载，`--merge` 下载后询问是否合并到正式目录 |
 | `uv run main.py list` | 查看本地库 |
 | `uv run main.py convert` | 交互选择漫画并转换目录结构；`--mode` 可选 `flat` / `nested`（默认 `flat`），`--index N` 可直接指定 |
 
@@ -110,10 +119,11 @@ downloads/
   如需统一为 `.png`，把 `config.json` 的 `convert_to_png` 设为 `true`（下载后自动转换）
 - 目录布局由 `config.json` 的 `chapter_layout` 控制：`"nested"`（二级文件夹）或 `"flat"`（扁平）
 - 旧版本下载的 `000`、`001`… 命名文件会在下次运行时自动改名为新命名，无需重新下载
-- **旧项目转换**：`uv run main.py convert` 会先列出本地库漫画，输入序号后把该漫画的
-  二级文件夹结构重命名为扁平结构（`Chapter 1/0.jpg` → `Chapter1_0.jpg`），并同步更新
-  `library.json`；也可用 `uv run main.py convert --index 0` 直接指定。转换完成后自动把
-  `chapter_layout` 设为 `"flat"`，后续新下载沿用扁平结构
+- **目录结构转换**：`uv run main.py convert` 会先列出本地库漫画，输入序号后转换该漫画的目录结构。
+  默认 `--mode flat`：二级文件夹重命名为扁平（`Chapter 1/0.jpg` → `Chapter1_0.jpg`）；
+  `--mode nested` 反向（`Chapter1_0.jpg` → `Chapter 1/0.jpg`）。转换同步更新 `library.json`，
+  完成后自动把 `chapter_layout` 设为与模式一致，后续新下载沿用该结构；
+  也可用 `uv run main.py convert --index 0 --mode flat` 直接指定漫画与方向
 
 ## 配置（config.json，首次运行自动生成）
 
@@ -148,6 +158,11 @@ downloads/
 每次成功下载章节后，章节 ID、页面数、文件清单都会写入 `library.json`。
 `update` 时重新抓取漫画页的最新章节列表，与本地记录比对，只报告（并可下载）新增章节，
 因此本地漫画目录可安全改名/移动，判断依据始终是站点章节 ID。
+
+更新下载的**新章节默认进入漫画目录下的 `update/` 子文件夹**（结构与正式布局一致），不会
+直接改动正式目录；确认无误后运行 `uv run main.py update --merge`（或更新时加 `--merge`
+下载完成后询问），把 `update/` 内容合并到正式位置并同步更新 `library.json`。
+合并可重复执行且幂等：目标文件已存在时会跳过，不覆盖已有内容。
 
 ## 常见问题
 

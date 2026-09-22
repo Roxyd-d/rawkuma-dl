@@ -55,7 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--download",
         action="store_true",
-        help="update 时自动下载新章节",
+        help="update 时自动下载新章节（跳过询问）",
+    )
+    p.add_argument(
+        "--merge",
+        action="store_true",
+        help="update 下载完成后询问是否把 update 文件夹合并到正式目录",
     )
     p.add_argument(
         "--index",
@@ -126,7 +131,13 @@ def main(argv: list[str] | None = None) -> None:
                     limit=args.limit,
                 )
             elif args.command == "update":
-                update_flow(site, lib, config, auto_download=args.download)
+                update_flow(
+                    site,
+                    lib,
+                    config,
+                    auto_download=args.download,
+                    merge=args.merge,
+                )
             else:
                 build_parser().print_help()
     except LoginRequired as exc:
@@ -150,6 +161,7 @@ def download_manga(
     latest: bool = False,
     targets: list[ChapterRef] | None = None,
     limit: int | None = None,
+    subdir: str | None = None,
 ) -> None:
     resp = site.get(manga_url)
     manga = parse_manga_page(resp.text, str(resp.url))
@@ -171,12 +183,16 @@ def download_manga(
         print(f"{manga.title}: 无需下载（已是最新）")
         return
 
-    print(f"{manga.title}: 开始下载 {len(targets)} 个章节 -> {manga_dir}")
+    # update 流程可指定子目录（如 update/），新章节先下载到该处，稍后合并
+    dl_dir = manga_dir / subdir if subdir else manga_dir
+    print(f"{manga.title}: 开始下载 {len(targets)} 个章节 -> {dl_dir}")
     rpc = build_rpc(config)
     try:
         for i, chapter in enumerate(targets, 1):
             print(f"  [{i}/{len(targets)}] {chapter.display} ...", end="", flush=True)
-            result = download_chapter(site, rpc, manga, rec, chapter, config)
+            result = download_chapter(
+                site, rpc, manga, rec, chapter, config, dl_dir=dl_dir
+            )
             if result.ok:
                 lib.record_chapter(
                     rec,
@@ -184,7 +200,7 @@ def download_manga(
                     label=chapter.label,
                     title=chapter.display,
                     chapter_url=chapter.url,
-                    chapter_dir=_chapter_dir(manga_dir, chapter, config),
+                    chapter_dir=_chapter_dir(dl_dir, chapter, config),
                     pages=result.pages,
                     files=result.files,
                 )
@@ -513,6 +529,7 @@ def update_flow(
     config: dict[str, Any],
     *,
     auto_download: bool,
+    merge: bool = False,
 ) -> None:
     records = lib.manga_list()
     if not records:
@@ -537,17 +554,112 @@ def update_flow(
             print(" ".join(c.display for c in new_chapters))
             pending.append((rec, new_chapters))
 
-    if auto_download and pending:
+    if not pending:
+        return
+
+    # 有更新时询问是否下载；--download 已指定则直接自动下载
+    if not auto_download:
         print()
+        print(f"{len(pending)} 部漫画存在更新：")
         for rec, chapters in pending:
-            print(f"下载 {rec['title']} 的新章节 ...")
-            download_manga(
-                site,
-                lib,
-                config,
-                rec["url"],
-                targets=chapters,
-            )
+            print(f"  {rec['title']}（{len(chapters)} 个新章节）")
+        try:
+            raw = input("是否下载新章节？(y/N): ").strip().lower()
+        except EOFError:
+            raw = "n"
+        if raw not in ("y", "yes"):
+            print("跳过。")
+            return
+
+    # 新章节默认下载到漫画目录下的 update/ 子目录，之后可合并
+    print()
+    for rec, chapters in pending:
+        print(f"下载 {rec['title']} 的新章节 -> update/ ...")
+        download_manga(
+            site,
+            lib,
+            config,
+            rec["url"],
+            targets=chapters,
+            subdir="update",
+        )
+
+    if not merge:
+        return
+
+    # --merge：下载完成后询问是否合并到正式目录
+    print()
+    try:
+        raw = input("是否合并 update 内容到正式目录？(y/N): ").strip().lower()
+    except EOFError:
+        raw = "n"
+    if raw not in ("y", "yes"):
+        print("跳过合并（新章节保留在 update 文件夹）。")
+        return
+    for rec, chapters in pending:
+        n = merge_updates(lib, rec)
+        if n:
+            print(f"合并 {rec['title']}: {n} 个文件")
+        else:
+            print(f"{rec['title']}: update 文件夹为空或不存在")
+    lib.save()
+
+
+def merge_updates(lib: Library, rec: dict[str, Any]) -> int:
+    """把 <漫画>/update/ 下的内容合并到正式目录，并更新 library 记录。
+
+    - 子目录结构（nested）：update/Chapter 28.2/0.png -> Chapter 28.2/0.png
+    - 扁平结构（flat）：update/Chapter28.2_0.png -> 漫画根目录
+    返回移动的文件数。
+    """
+    manga_dir = Path(rec["dir"])
+    upd = manga_dir / "update"
+    if not upd.is_dir():
+        return 0
+    moved = 0
+
+    # nested 风格：update 下的章节子目录
+    for sub in sorted(p for p in upd.iterdir() if p.is_dir()):
+        target_dir = manga_dir / sub.name
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for f in sorted(sub.iterdir()):
+            if not f.is_file():
+                continue
+            t = target_dir / f.name
+            if t.exists():
+                print(f"  {t.name} 已存在，跳过")
+                continue
+            f.rename(t)
+            moved += 1
+        try:
+            sub.rmdir()
+        except OSError:
+            pass
+
+    # flat 风格：update 下直接是图片文件
+    for f in sorted(upd.iterdir()):
+        if not f.is_file():
+            continue
+        t = manga_dir / f.name
+        if t.exists():
+            print(f"  {t.name} 已存在，跳过")
+            continue
+        f.rename(t)
+        moved += 1
+
+    try:
+        upd.rmdir()
+    except OSError:
+        pass
+
+    # 更新 library：指向 update 的章节记录改回正式目录（文件名不变）
+    for ch in rec.get("chapters", []):
+        d = Path(ch.get("dir", ""))
+        if d == upd:
+            ch["dir"] = str(manga_dir)  # flat：记录的就是 update 根
+        elif d.parent == upd:
+            ch["dir"] = str(manga_dir / d.name)  # nested：update/<章节目录>
+    return moved
 
 
 # --------------------------------------------------------------------------- #

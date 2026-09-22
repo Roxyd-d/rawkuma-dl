@@ -43,11 +43,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chapter_dir_style": "site",
     # 下载目录布局：nested=二级文件夹（<漫画>/Chapter 1/0.png）；
     #              flat=扁平（<漫画>/Chapter1_0.png，图片文件名带章节前缀）
-    "chapter_layout": "nested",
+    "chapter_layout": "flat",
     # 图片文件名补零位数：1 -> 0.jpg, 1.jpg, ..., 10.jpg（从 0 顺序编号，不补零）
     "image_pad_digits": 1,
     # 下载完成后是否转成 PNG（源图通常是 jpg；True 时输出 0.png 并删除源文件）
-    "convert_to_png": True,
+    "convert_to_png": False,
 }
 
 
