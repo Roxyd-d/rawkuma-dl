@@ -24,20 +24,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "library_file": "library.json",
     # 漫画下载根目录
     "download_root": "downloads",
-    # 第三方下载器（Rayburst，底层 Aria2）RPC 配置
+    # 图片下载（爬虫进程内直下，无需第三方下载器）
     "downloader": {
-        # 后端协议：aria2 = aria2 兼容 JSON-RPC（Rayburst/Motrix 桌面端均支持）
-        "backend": "aria2",
-        # Rayburst 默认监听 127.0.0.1:16800/jsonrpc；可在 Rayburst 设置里核对
-        "rpc_url": "http://127.0.0.1:16800/jsonrpc",
-        # RPC 密钥；Rayburst/Motrix 默认 "token"，如设置为空则不传 token
-        "secret": "token",
-        # 轮询下载状态间隔（秒）
-        "poll_interval": 1.0,
-        # 单个章节整体下载超时（秒）
-        "task_timeout": 600,
-        # 每个任务的最大连接数
-        "connections_per_server": 4,
+        # 并发下载的图片数
+        "max_concurrent": 4,
+        # 单张图片下载失败后的重试次数
+        "retries": 3,
+        # 单张图片请求超时（秒）
+        "request_timeout": 120,
     },
     # 章节目录命名：site=站点标签(Chapter 1) / cn=第N话
     "chapter_dir_style": "site",
@@ -46,9 +40,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chapter_layout": "flat",
     # 图片文件名补零位数：1 -> 0.jpg, 1.jpg, ..., 10.jpg（从 0 顺序编号，不补零）
     "image_pad_digits": 1,
-    # 下载完成后是否转成 PNG（源图通常是 jpg；True 时输出 0.png 并删除源文件）
-    "convert_to_png": False,
+    # 图片格式转换：original=不转换（保留源图格式，站点为 jpg）；
+    #               png=统一转为 PNG；jpg=统一转为 JPG（下载后自动转换）
+    "image_format": "png",
 }
+
+
+def _migrate(raw: dict[str, Any]) -> dict[str, Any]:
+    """旧版配置兼容：convert_to_png(布尔) -> image_format。"""
+    if "image_format" not in raw and "convert_to_png" in raw:
+        raw["image_format"] = "png" if raw.pop("convert_to_png") else "original"
+    return raw
 
 
 def load_config(path: Path | str | None = None) -> dict[str, Any]:
@@ -62,6 +64,7 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
         return json.loads(json.dumps(DEFAULT_CONFIG))
 
     raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    raw = _migrate(raw)
 
     def _merge(base: dict, override: dict) -> dict:
         out = dict(base)

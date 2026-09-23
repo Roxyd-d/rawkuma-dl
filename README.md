@@ -1,12 +1,12 @@
 # Rawkuma 漫画下载器
 
-对 [rawkuma.net](https://rawkuma.net) 的漫画进行命令行爬取，图片下载交给第三方下载器
-[Rayburst](https://rayburst.pages.dev)（开源下载管理器，底层为 Aria2 Next），并维护一份本地
-JSON 库用于增量下载与更新检查。
+对 [rawkuma.net](https://rawkuma.net) 的漫画进行命令行爬取，图片在爬虫进程内直接并发下载
+（不依赖任何第三方下载器），并维护一份本地 JSON 库用于增量下载与更新检查。
 
 ## 特性
 
 - **命令行运行，无需图形界面**；唯一需要浏览器的一步是登录
+- **进程内直下**：图片由 Python 直接并发下载（默认 4 并发），无需启动 Rayburst/aria2 等下载器
 - 支持两种下载入口：
     - `-url <漫画页链接>`：直接按链接下载
     - `bookmark`：读取收藏夹，按索引选择下载
@@ -18,7 +18,6 @@ JSON 库用于增量下载与更新检查。
 ## 环境要求
 
 - [uv](https://docs.astral.sh/uv/)（Python 3.12 由 uv 自动管理）
-- [Rayburst](https://rayburst.pages.dev) 桌面端（保持运行，用于实际下载图片）/ 自行配置 [Aria2 Next](https://github.com/AnInsomniacy/aria2-next)
 
 ## 安装
 
@@ -28,9 +27,6 @@ uv sync
 
 # 2. 安装登录用的浏览器内核（首次）
 uv run playwright install msedge
-
-# 3. 启动 Rayburst 桌面端，确认 RPC 已开启（默认 http://127.0.0.1:16800/jsonrpc，密钥 token）
-#    如与默认不同，修改 config.json 的 downloader 段即可
 ```
 
 ## 快速开始
@@ -73,6 +69,7 @@ uv run main.py update --merge
 | `uv run main.py bookmark` | 打印收藏夹列表并交互选择序号下载；`--index N` 可直接指定 |
 | `uv run main.py update` | 逐部检查更新，发现更新后询问是否下载；新章节下载到漫画目录的 `update/` 子文件夹；`--download` 直接自动下载，`--merge` 下载后询问是否合并到正式目录 |
 | `uv run main.py list` | 查看本地库 |
+| `uv run main.py merge` | 把漫画目录下 `update/` 子文件夹合并到正式目录（交互选择漫画；`--index N` 可直接指定） |
 | `uv run main.py convert` | 交互选择漫画并转换目录结构；`--mode` 可选 `flat` / `nested`（默认 `flat`），`--index N` 可直接指定 |
 
 可选参数（配合 `-url` / `bookmark`）：
@@ -116,7 +113,7 @@ downloads/
   将 `config.json` 的 `chapter_dir_style` 改为 `"cn"`
 - 图片文件从 `0` 开始顺序编号（`0`、`1`、`2`…`10`…），扩展名保留源图格式（站点为 jpg）；
   如需补零，可将 `config.json` 的 `image_pad_digits` 设为 `3`（`000`、`001`…）；
-  如需统一为 `.png`，把 `config.json` 的 `convert_to_png` 设为 `true`（下载后自动转换）
+  如需统一为 `.png`，把 `config.json` 的 `image_format` 设为 `"png"`（下载后自动转换）
 - 目录布局由 `config.json` 的 `chapter_layout` 控制：`"nested"`（二级文件夹）或 `"flat"`（扁平）
 - 旧版本下载的 `000`、`001`… 命名文件会在下次运行时自动改名为新命名，无需重新下载
 - **目录结构转换**：`uv run main.py convert` 会先列出本地库漫画，输入序号后转换该漫画的目录结构。
@@ -134,22 +131,22 @@ downloads/
     "library_file": "library.json",
     "download_root": "downloads",
     "downloader": {
-        "backend": "aria2",
-        "rpc_url": "http://127.0.0.1:16800/jsonrpc",
-        "secret": "token",
-        "poll_interval": 1.0,
-        "task_timeout": 600,
-        "connections_per_server": 4
+        "backend": "internal",
+        "max_concurrent": 4,
+        "retries": 3,
+        "request_timeout": 120
     },
     "chapter_dir_style": "site",
     "chapter_layout": "nested",
     "image_pad_digits": 1,
-    "convert_to_png": false
+    "image_format": "png"
 }
 ```
 
-- `downloader`：对接 Rayburst 的 Aria2 Next 兼容 JSON-RPC。若 Rayburst 的 RPC 端口/密钥不同，
-  在应用设置里查看后修改这两项即可；`secret` 留空表示无密钥
+- `downloader`：进程内下载参数。`max_concurrent` 为并发下载的图片数；`retries` 为单张图片
+  失败重试次数；`request_timeout` 为单张图片请求超时（秒）。无需任何第三方下载器
+- `image_format`：`original` 不转换（保留源图 jpg）；`png` 统一转 PNG；`jpg` 统一转 JPG
+  （旧版 `convert_to_png` 配置会自动迁移）
 - `download_root`：下载根目录（相对项目根目录）
 - `chapter_layout`：`"nested"`（默认，二级文件夹）或 `"flat"`（扁平，文件名带章节前缀）
 
@@ -160,12 +157,15 @@ downloads/
 因此本地漫画目录可安全改名/移动，判断依据始终是站点章节 ID。
 
 更新下载的**新章节默认进入漫画目录下的 `update/` 子文件夹**（结构与正式布局一致），不会
-直接改动正式目录；确认无误后运行 `uv run main.py update --merge`（或更新时加 `--merge`
-下载完成后询问），把 `update/` 内容合并到正式位置并同步更新 `library.json`。
+直接改动正式目录；确认无误后运行 `uv run main.py merge`（或更新时加 `--merge` 下载完成后
+询问），把 `update/` 内容合并到正式位置并同步更新 `library.json`。
 合并可重复执行且幂等：目标文件已存在时会跳过，不覆盖已有内容。
 
 ## 常见问题
 
-- **提示「无法连接下载器」**：Rayburst 未启动，或 RPC 地址/密钥与 `config.json` 不一致
+- **某章有图片下载失败**：会自动重试 `retries` 次；仍失败的章节会列出文件名，重跑 `-url` 或
+  `update` 即可补下（已下载的自动跳过）
 - **提示「该页面需要登录」**：Cookie 缺失或过期，重新执行 `uv run main.py login`
 - **收藏夹为空**：确认已登录，且收藏夹里确有内容
+- **下载速度慢**：调大 `config.json` 的 `downloader.max_concurrent`（如 8），并注意不要过大
+  以免被站点限流

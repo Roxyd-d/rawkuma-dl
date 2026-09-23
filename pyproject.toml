@@ -1,7 +1,7 @@
 [project]
 name = "rawkuma-dl"
 version = "0.1.0"
-description = "Rawkuma 漫画下载器：命令行爬取 + Rayburst 下载 + JSON 增量库"
+description = "Rawkuma 漫画下载器：命令行爬取 + 进程内并发下载 + JSON 增量库"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

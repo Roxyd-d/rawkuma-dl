@@ -10,7 +10,7 @@ from typing import Any
 
 from .client import LoginRequired, SiteClient
 from .config import PROJECT_ROOT, load_config, resolve_path
-from .downloader import build_rpc, download_chapter, _sanitize
+from .downloader import download_chapter, _sanitize
 from .library import Library
 from .login import run_login
 from .parser import (
@@ -38,10 +38,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "command",
         nargs="?",
-        choices=["login", "bookmark", "update", "list", "convert"],
+        choices=["login", "bookmark", "update", "list", "convert", "merge"],
         help="子命令: login=浏览器登录; bookmark=按收藏夹索引下载; "
         "update=检查更新; list=查看本地库; "
-        "convert=交互选择漫画并转换为扁平结构（--index N 可直接指定）",
+        "convert=交互选择漫画并转换目录结构（--index N 可直接指定）; "
+        "merge=把 update/ 子文件夹合并到正式目录（--index N 可直接指定）",
     )
     p.add_argument(
         "--chapters",
@@ -65,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--index",
         type=int,
-        help="bookmark / convert 时直接指定序号（跳过交互选择）",
+        help="bookmark / convert / merge 时直接指定序号（跳过交互选择）",
     )
     p.add_argument(
         "--mode",
@@ -106,6 +107,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "convert":
         convert_flow(lib, config, index=args.index, mode=args.mode)
+        return
+
+    if args.command == "merge":
+        merge_flow(lib, index=args.index)
         return
 
     try:
@@ -186,30 +191,24 @@ def download_manga(
     # update 流程可指定子目录（如 update/），新章节先下载到该处，稍后合并
     dl_dir = manga_dir / subdir if subdir else manga_dir
     print(f"{manga.title}: 开始下载 {len(targets)} 个章节 -> {dl_dir}")
-    rpc = build_rpc(config)
-    try:
-        for i, chapter in enumerate(targets, 1):
-            print(f"  [{i}/{len(targets)}] {chapter.display} ...", end="", flush=True)
-            result = download_chapter(
-                site, rpc, manga, rec, chapter, config, dl_dir=dl_dir
+    for i, chapter in enumerate(targets, 1):
+        print(f"  [{i}/{len(targets)}] {chapter.display} ...", end="", flush=True)
+        result = download_chapter(site, manga, rec, chapter, config, dl_dir=dl_dir)
+        if result.ok:
+            lib.record_chapter(
+                rec,
+                chapter_id=chapter.id,
+                label=chapter.label,
+                title=chapter.display,
+                chapter_url=chapter.url,
+                chapter_dir=_chapter_dir(dl_dir, chapter, config),
+                pages=result.pages,
+                files=result.files,
             )
-            if result.ok:
-                lib.record_chapter(
-                    rec,
-                    chapter_id=chapter.id,
-                    label=chapter.label,
-                    title=chapter.display,
-                    chapter_url=chapter.url,
-                    chapter_dir=_chapter_dir(dl_dir, chapter, config),
-                    pages=result.pages,
-                    files=result.files,
-                )
-                lib.save()
-                print(f" 完成（{result.pages} 页）")
-            else:
-                print(f"  失败: {result.message}")
-    finally:
-        rpc.close()
+            lib.save()
+            print(f" 完成（{result.pages} 页）")
+        else:
+            print(f"  失败: {result.message}")
 
 
 def _chapter_dir(manga_dir: Path, chapter: ChapterRef, config: dict[str, Any]) -> Path:
@@ -602,6 +601,53 @@ def update_flow(
             print(f"合并 {rec['title']}: {n} 个文件")
         else:
             print(f"{rec['title']}: update 文件夹为空或不存在")
+    lib.save()
+
+
+def merge_flow(lib: Library, index: int | None = None) -> None:
+    """把漫画目录下的 update/ 子文件夹合并到正式目录（独立命令 merge）。
+
+    先列出存在 update/ 内容的漫画并交互选择序号（像 bookmark/convert 一样）；
+    --index N 可直接指定。复用 merge_updates 完成实际移动并更新 library 记录。
+    """
+    records = lib.manga_list()
+    if not records:
+        print("本地库为空。")
+        return
+
+    candidates: list[tuple[int, dict[str, Any], int]] = []
+    for i, rec in enumerate(records):
+        upd = Path(rec.get("dir", "")) / "update"
+        if upd.is_dir():
+            n = sum(1 for p in upd.rglob("*") if p.is_file())
+            if n:
+                candidates.append((i, rec, n))
+
+    if not candidates:
+        print("没有待合并的 update 内容（所有漫画目录下均无 update/ 文件夹）。")
+        return
+
+    print("以下漫画存在 update/ 内容：")
+    for j, (_, rec, n) in enumerate(candidates):
+        print(f"{j} {rec.get('title', '?')}（{n} 个文件）")
+
+    if index is None:
+        try:
+            raw = input("输入序号合并: ").strip()
+            index = int(raw)
+        except (ValueError, EOFError):
+            print("输入无效。")
+            return
+    if index < 0 or index >= len(candidates):
+        print(f"序号越界（0-{len(candidates) - 1}）。")
+        return
+
+    _, rec, _ = candidates[index]
+    n = merge_updates(lib, rec)
+    if n:
+        print(f"合并 {rec.get('title', '?')}: {n} 个文件")
+    else:
+        print(f"{rec.get('title', '?')}: update 文件夹为空或不存在")
     lib.save()
 
 

@@ -10,4 +10,5 @@ wheels/
 .venv
 config.json
 cookies.json
+library.json
 downloads/
